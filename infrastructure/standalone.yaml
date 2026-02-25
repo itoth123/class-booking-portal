@@ -1,0 +1,968 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: |
+  Class Booking Portal - Standalone Template
+  Minimal cost serverless architecture for class booking management.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Environment name
+
+  ProjectName:
+    Type: String
+    Default: class-booking
+    Description: Project name for resource naming
+
+Conditions:
+  IsProd: !Equals [!Ref Environment, "prod"]
+
+Resources:
+  # ===========================================================================
+  # DATABASE - DynamoDB
+  # ===========================================================================
+  ClassesTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub "${ProjectName}-${Environment}-classes"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: classId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: classId
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [IsProd, true, false]
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  BookingsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub "${ProjectName}-${Environment}-bookings"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: bookingId
+          AttributeType: S
+        - AttributeName: classId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: bookingId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: classId-index
+          KeySchema:
+            - AttributeName: classId
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [IsProd, true, false]
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  # ===========================================================================
+  # AUTHENTICATION - Cognito (admin only)
+  # ===========================================================================
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub "${ProjectName}-${Environment}-users"
+      UsernameAttributes: [email]
+      AutoVerifiedAttributes: [email]
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireUppercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+      Schema:
+        - Name: email
+          Required: true
+          Mutable: true
+        - Name: name
+          Required: false
+          Mutable: true
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub "${ProjectName}-${Environment}-client"
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+      PreventUserExistenceErrors: ENABLED
+      AccessTokenValidity: 1
+      IdTokenValidity: 1
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: hours
+        IdToken: hours
+        RefreshToken: days
+
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Sub "${ProjectName}-${Environment}-${AWS::AccountId}"
+      UserPoolId: !Ref UserPool
+
+  # ===========================================================================
+  # BACKEND - Lambda
+  # ===========================================================================
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-${Environment}-lambda-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt ClassesTable.Arn
+                  - !Sub "${ClassesTable.Arn}/index/*"
+                  - !GetAtt BookingsTable.Arn
+                  - !Sub "${BookingsTable.Arn}/index/*"
+
+  ApiFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-${Environment}-api"
+      Runtime: python3.11
+      Handler: index.handler
+      Role: !GetAtt LambdaRole.Arn
+      MemorySize: 256
+      Timeout: 30
+      Environment:
+        Variables:
+          CLASSES_TABLE: !Ref ClassesTable
+          BOOKINGS_TABLE: !Ref BookingsTable
+          ENVIRONMENT: !Ref Environment
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import uuid
+          import os
+          from datetime import datetime
+          from decimal import Decimal
+
+          dynamodb = boto3.resource('dynamodb')
+          classes_table = dynamodb.Table(os.environ['CLASSES_TABLE'])
+          bookings_table = dynamodb.Table(os.environ['BOOKINGS_TABLE'])
+
+          def json_serial(obj):
+              if isinstance(obj, Decimal):
+                  return int(obj) if obj == int(obj) else float(obj)
+              if isinstance(obj, datetime):
+                  return obj.isoformat()
+              raise TypeError(f"Type {type(obj)} not serializable")
+
+          def resp(status_code, body):
+              return {
+                  'statusCode': status_code,
+                  'headers': {
+                      'Content-Type': 'application/json',
+                      'Access-Control-Allow-Origin': '*',
+                      'Access-Control-Allow-Headers': 'Content-Type,Authorization',
+                      'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
+                  },
+                  'body': json.dumps(body, default=json_serial)
+              }
+
+          def handler(event, context):
+              method = event.get('httpMethod', '')
+              path = event.get('resource', '')
+              path_params = event.get('pathParameters') or {}
+
+              if method == 'OPTIONS':
+                  return resp(200, {'message': 'OK'})
+
+              try:
+                  # === PUBLIC ENDPOINTS ===
+
+                  # GET /classes - list available classes (public)
+                  if method == 'GET' and path == '/classes':
+                      result = classes_table.scan()
+                      items = result.get('Items', [])
+                      public_classes = []
+                      for c in items:
+                          public_classes.append({
+                              'classId': c['classId'],
+                              'title': c.get('title', ''),
+                              'description': c.get('description', ''),
+                              'instructor': c.get('instructor', ''),
+                              'dateTime': c.get('dateTime', ''),
+                              'duration': c.get('duration', ''),
+                              'location': c.get('location', ''),
+                              'totalSeats': c.get('totalSeats', 0),
+                              'availableSeats': c.get('availableSeats', 0),
+                          })
+                      return resp(200, {'classes': public_classes})
+
+                  # GET /classes/{id} - single class detail (public)
+                  if method == 'GET' and path == '/classes/{id}':
+                      class_id = path_params.get('id')
+                      result = classes_table.get_item(Key={'classId': class_id})
+                      if 'Item' not in result:
+                          return resp(404, {'error': 'Class not found'})
+                      c = result['Item']
+                      return resp(200, {
+                          'classId': c['classId'],
+                          'title': c.get('title', ''),
+                          'description': c.get('description', ''),
+                          'instructor': c.get('instructor', ''),
+                          'dateTime': c.get('dateTime', ''),
+                          'duration': c.get('duration', ''),
+                          'location': c.get('location', ''),
+                          'totalSeats': c.get('totalSeats', 0),
+                          'availableSeats': c.get('availableSeats', 0),
+                      })
+
+                  # POST /classes/{id}/book - book a seat (public)
+                  if method == 'POST' and path == '/classes/{id}/book':
+                      class_id = path_params.get('id')
+                      body = json.loads(event.get('body', '{}'))
+
+                      required = ['firstName', 'lastName', 'email']
+                      missing = [f for f in required if not body.get(f)]
+                      if missing:
+                          return resp(400, {'error': f'Missing required fields: {missing}'})
+
+                      result = classes_table.get_item(Key={'classId': class_id})
+                      if 'Item' not in result:
+                          return resp(404, {'error': 'Class not found'})
+
+                      cls = result['Item']
+                      available = cls.get('availableSeats', 0)
+                      if available <= 0:
+                          return resp(409, {'error': 'No seats available'})
+
+                      now = datetime.utcnow().isoformat()
+                      booking = {
+                          'bookingId': str(uuid.uuid4()),
+                          'classId': class_id,
+                          'firstName': body['firstName'],
+                          'lastName': body['lastName'],
+                          'email': body['email'],
+                          'phone': body.get('phone', ''),
+                          'notes': body.get('notes', ''),
+                          'bookedAt': now,
+                      }
+
+                      try:
+                          classes_table.update_item(
+                              Key={'classId': class_id},
+                              UpdateExpression='SET availableSeats = availableSeats - :one, updatedAt = :now',
+                              ConditionExpression='availableSeats > :zero',
+                              ExpressionAttributeValues={
+                                  ':one': 1,
+                                  ':zero': 0,
+                                  ':now': now,
+                              },
+                          )
+                      except dynamodb.meta.client.exceptions.ConditionalCheckFailedException:
+                          return resp(409, {'error': 'No seats available'})
+
+                      bookings_table.put_item(Item=booking)
+
+                      return resp(201, {
+                          'message': 'Booking confirmed',
+                          'bookingId': booking['bookingId'],
+                          'className': cls.get('title', ''),
+                      })
+
+                  # === ADMIN ENDPOINTS (protected by Cognito authorizer) ===
+
+                  # GET /admin/classes - list all classes with full details
+                  if method == 'GET' and path == '/admin/classes':
+                      result = classes_table.scan()
+                      return resp(200, {
+                          'classes': result.get('Items', []),
+                          'count': result.get('Count', 0)
+                      })
+
+                  # POST /admin/classes - create a class
+                  if method == 'POST' and path == '/admin/classes':
+                      body = json.loads(event.get('body', '{}'))
+                      required = ['title', 'totalSeats']
+                      missing = [f for f in required if f not in body]
+                      if missing:
+                          return resp(400, {'error': f'Missing: {missing}'})
+
+                      now = datetime.utcnow().isoformat()
+                      total = int(body['totalSeats'])
+                      item = {
+                          'classId': str(uuid.uuid4()),
+                          'title': body['title'],
+                          'description': body.get('description', ''),
+                          'instructor': body.get('instructor', ''),
+                          'dateTime': body.get('dateTime', ''),
+                          'duration': body.get('duration', ''),
+                          'location': body.get('location', ''),
+                          'totalSeats': total,
+                          'availableSeats': total,
+                          'createdAt': now,
+                          'updatedAt': now,
+                      }
+                      classes_table.put_item(Item=item)
+                      return resp(201, item)
+
+                  # GET /admin/classes/{id} - get class with bookings
+                  if method == 'GET' and path == '/admin/classes/{id}':
+                      class_id = path_params.get('id')
+                      result = classes_table.get_item(Key={'classId': class_id})
+                      if 'Item' not in result:
+                          return resp(404, {'error': 'Class not found'})
+
+                      bookings_result = bookings_table.query(
+                          IndexName='classId-index',
+                          KeyConditionExpression=boto3.dynamodb.conditions.Key('classId').eq(class_id)
+                      )
+
+                      cls = result['Item']
+                      cls['bookings'] = bookings_result.get('Items', [])
+                      return resp(200, cls)
+
+                  # PUT /admin/classes/{id} - update a class
+                  if method == 'PUT' and path == '/admin/classes/{id}':
+                      class_id = path_params.get('id')
+                      existing = classes_table.get_item(Key={'classId': class_id})
+                      if 'Item' not in existing:
+                          return resp(404, {'error': 'Class not found'})
+
+                      body = json.loads(event.get('body', '{}'))
+                      now = datetime.utcnow().isoformat()
+                      old = existing['Item']
+
+                      update_expr = 'SET updatedAt = :now'
+                      expr_vals = {':now': now}
+
+                      for field in ['title', 'description', 'instructor', 'dateTime', 'duration', 'location']:
+                          if field in body:
+                              update_expr += f', {field} = :{field}'
+                              expr_vals[f':{field}'] = body[field]
+
+                      if 'totalSeats' in body:
+                          new_total = int(body['totalSeats'])
+                          old_total = old.get('totalSeats', 0)
+                          old_available = old.get('availableSeats', 0)
+                          new_available = old_available + (new_total - old_total)
+                          if new_available < 0:
+                              return resp(400, {'error': 'Cannot reduce seats below number of bookings'})
+                          update_expr += ', totalSeats = :totalSeats, availableSeats = :availableSeats'
+                          expr_vals[':totalSeats'] = new_total
+                          expr_vals[':availableSeats'] = new_available
+
+                      result = classes_table.update_item(
+                          Key={'classId': class_id},
+                          UpdateExpression=update_expr,
+                          ExpressionAttributeValues=expr_vals,
+                          ReturnValues='ALL_NEW'
+                      )
+                      return resp(200, result['Attributes'])
+
+                  # DELETE /admin/classes/{id} - delete a class and its bookings
+                  if method == 'DELETE' and path == '/admin/classes/{id}':
+                      class_id = path_params.get('id')
+                      existing = classes_table.get_item(Key={'classId': class_id})
+                      if 'Item' not in existing:
+                          return resp(404, {'error': 'Class not found'})
+
+                      bookings_result = bookings_table.query(
+                          IndexName='classId-index',
+                          KeyConditionExpression=boto3.dynamodb.conditions.Key('classId').eq(class_id)
+                      )
+                      for b in bookings_result.get('Items', []):
+                          bookings_table.delete_item(Key={'bookingId': b['bookingId']})
+
+                      classes_table.delete_item(Key={'classId': class_id})
+                      return resp(200, {'message': 'Deleted'})
+
+                  # DELETE /admin/bookings/{id} - cancel a single booking
+                  if method == 'DELETE' and path == '/admin/bookings/{id}':
+                      booking_id = path_params.get('id')
+                      result = bookings_table.get_item(Key={'bookingId': booking_id})
+                      if 'Item' not in result:
+                          return resp(404, {'error': 'Booking not found'})
+
+                      booking = result['Item']
+                      now = datetime.utcnow().isoformat()
+
+                      classes_table.update_item(
+                          Key={'classId': booking['classId']},
+                          UpdateExpression='SET availableSeats = availableSeats + :one, updatedAt = :now',
+                          ExpressionAttributeValues={':one': 1, ':now': now},
+                      )
+
+                      bookings_table.delete_item(Key={'bookingId': booking_id})
+                      return resp(200, {'message': 'Booking cancelled'})
+
+                  return resp(405, {'error': 'Method not allowed'})
+
+              except Exception as e:
+                  print(f"Error: {e}")
+                  return resp(500, {'error': 'Internal server error'})
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  ApiFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ApiFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${BookingApi}/*"
+
+  # ===========================================================================
+  # API GATEWAY
+  # ===========================================================================
+  BookingApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub "${ProjectName}-${Environment}-api"
+      Description: Class Booking API
+      EndpointConfiguration:
+        Types: [REGIONAL]
+
+  CognitoAuthorizer:
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      Name: CognitoAuth
+      RestApiId: !Ref BookingApi
+      Type: COGNITO_USER_POOLS
+      IdentitySource: method.request.header.Authorization
+      ProviderARNs:
+        - !GetAtt UserPool.Arn
+
+  # ---------------------------------------------------------------------------
+  # PUBLIC: /classes
+  # ---------------------------------------------------------------------------
+  ClassesResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref BookingApi
+      ParentId: !GetAtt BookingApi.RootResourceId
+      PathPart: classes
+
+  ClassesOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BookingApi
+      ResourceId: !Ref ClassesResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              application/json: ''
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  ClassesGet:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BookingApi
+      ResourceId: !Ref ClassesResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations"
+
+  # /classes/{id}
+  ClassIdResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref BookingApi
+      ParentId: !Ref ClassesResource
+      PathPart: "{id}"
+
+  ClassIdOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BookingApi
+      ResourceId: !Ref ClassIdResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              application/json: ''
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  ClassIdGet:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BookingApi
+      ResourceId: !Ref ClassIdResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      RequestParameters:
+        method.request.path.id: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations"
+
+  # /classes/{id}/book
+  BookResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref BookingApi
+      ParentId: !Ref ClassIdResource
+      PathPart: book
+
+  BookOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BookingApi
+      ResourceId: !Ref BookResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              application/json: ''
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  BookPost:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BookingApi
+      ResourceId: !Ref BookResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      RequestParameters:
+        method.request.path.id: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations"
+
+  # ---------------------------------------------------------------------------
+  # ADMIN: /admin/classes
+  # ---------------------------------------------------------------------------
+  AdminResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref BookingApi
+      ParentId: !GetAtt BookingApi.RootResourceId
+      PathPart: admin
+
+  AdminClassesResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref BookingApi
+      ParentId: !Ref AdminResource
+      PathPart: classes
+
+  AdminClassesOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BookingApi
+      ResourceId: !Ref AdminClassesResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              application/json: ''
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  AdminClassesGet:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BookingApi
+      ResourceId: !Ref AdminClassesResource
+      HttpMethod: GET
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref CognitoAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations"
+
+  AdminClassesPost:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BookingApi
+      ResourceId: !Ref AdminClassesResource
+      HttpMethod: POST
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref CognitoAuthorizer
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations"
+
+  # /admin/classes/{id}
+  AdminClassIdResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref BookingApi
+      ParentId: !Ref AdminClassesResource
+      PathPart: "{id}"
+
+  AdminClassIdOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BookingApi
+      ResourceId: !Ref AdminClassIdResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,PUT,DELETE,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              application/json: ''
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  AdminClassIdGet:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BookingApi
+      ResourceId: !Ref AdminClassIdResource
+      HttpMethod: GET
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref CognitoAuthorizer
+      RequestParameters:
+        method.request.path.id: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations"
+
+  AdminClassIdPut:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BookingApi
+      ResourceId: !Ref AdminClassIdResource
+      HttpMethod: PUT
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref CognitoAuthorizer
+      RequestParameters:
+        method.request.path.id: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations"
+
+  AdminClassIdDelete:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BookingApi
+      ResourceId: !Ref AdminClassIdResource
+      HttpMethod: DELETE
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref CognitoAuthorizer
+      RequestParameters:
+        method.request.path.id: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations"
+
+  # /admin/bookings/{id}
+  AdminBookingsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref BookingApi
+      ParentId: !Ref AdminResource
+      PathPart: bookings
+
+  AdminBookingIdResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref BookingApi
+      ParentId: !Ref AdminBookingsResource
+      PathPart: "{id}"
+
+  AdminBookingIdOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BookingApi
+      ResourceId: !Ref AdminBookingIdResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+              method.response.header.Access-Control-Allow-Methods: "'DELETE,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              application/json: ''
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  AdminBookingIdDelete:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BookingApi
+      ResourceId: !Ref AdminBookingIdResource
+      HttpMethod: DELETE
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref CognitoAuthorizer
+      RequestParameters:
+        method.request.path.id: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations"
+
+  # ---------------------------------------------------------------------------
+  # DEPLOYMENT
+  # ---------------------------------------------------------------------------
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - ClassesGet
+      - ClassesOptions
+      - ClassIdGet
+      - ClassIdOptions
+      - BookPost
+      - BookOptions
+      - AdminClassesGet
+      - AdminClassesPost
+      - AdminClassesOptions
+      - AdminClassIdGet
+      - AdminClassIdPut
+      - AdminClassIdDelete
+      - AdminClassIdOptions
+      - AdminBookingIdDelete
+      - AdminBookingIdOptions
+    Properties:
+      RestApiId: !Ref BookingApi
+
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref BookingApi
+      DeploymentId: !Ref ApiDeployment
+      StageName: !Ref Environment
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          ThrottlingBurstLimit: 100
+          ThrottlingRateLimit: 50
+
+  # ===========================================================================
+  # FRONTEND HOSTING
+  # ===========================================================================
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Sub "sit-${ProjectName}-${Environment}-frontend"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  CloudFrontOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${ProjectName}-${Environment}-oac"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${FrontendBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        PriceClass: PriceClass_100
+        HttpVersion: http2and3
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+            OriginAccessControlId: !Ref CloudFrontOAC
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 300
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 300
+        Restrictions:
+          GeoRestriction:
+            RestrictionType: none
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint
+    Value: !Sub "https://${BookingApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}"
+
+  WebsiteURL:
+    Description: CloudFront URL
+    Value: !Sub "https://${CloudFrontDistribution.DomainName}"
+
+  FrontendBucket:
+    Description: S3 bucket for frontend
+    Value: !Ref FrontendBucket
+
+  CloudFrontDistributionId:
+    Description: CloudFront distribution ID
+    Value: !Ref CloudFrontDistribution
+
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref UserPool
+
+  UserPoolClientId:
+    Description: Cognito Client ID
+    Value: !Ref UserPoolClient
+
+  ClassesTableName:
+    Description: DynamoDB classes table name
+    Value: !Ref ClassesTable
+
+  BookingsTableName:
+    Description: DynamoDB bookings table name
+    Value: !Ref BookingsTable

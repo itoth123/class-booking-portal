@@ -1,0 +1,6 @@
+{
+  "apiEndpoint": "https://vpive9n993.execute-api.us-east-1.amazonaws.com/dev",
+  "cognitoUserPoolId": "us-east-1_jGvxIAdkl",
+  "cognitoClientId": "1tp9k6vht72f85jmkj6h7pqebi",
+  "region": "us-east-1"
+}
