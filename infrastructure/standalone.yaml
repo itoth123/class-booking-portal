@@ -372,10 +372,13 @@ Resources:
 
                       update_expr = 'SET updatedAt = :now'
                       expr_vals = {':now': now}
+                      expr_names = {}
 
                       for field in ['title', 'description', 'instructor', 'dateTime', 'duration', 'location']:
                           if field in body:
-                              update_expr += f', {field} = :{field}'
+                              attr_name = f'#{field}'
+                              expr_names[attr_name] = field
+                              update_expr += f', {attr_name} = :{field}'
                               expr_vals[f':{field}'] = body[field]
 
                       if 'totalSeats' in body:
@@ -389,12 +392,16 @@ Resources:
                           expr_vals[':totalSeats'] = new_total
                           expr_vals[':availableSeats'] = new_available
 
-                      result = classes_table.update_item(
-                          Key={'classId': class_id},
-                          UpdateExpression=update_expr,
-                          ExpressionAttributeValues=expr_vals,
-                          ReturnValues='ALL_NEW'
-                      )
+                      update_kwargs = {
+                          'Key': {'classId': class_id},
+                          'UpdateExpression': update_expr,
+                          'ExpressionAttributeValues': expr_vals,
+                          'ReturnValues': 'ALL_NEW',
+                      }
+                      if expr_names:
+                          update_kwargs['ExpressionAttributeNames'] = expr_names
+
+                      result = classes_table.update_item(**update_kwargs)
                       return resp(200, result['Attributes'])
 
                   # DELETE /admin/classes/{id} - delete a class and its bookings
