@@ -136,7 +136,7 @@ export default function BookingForm() {
               )}
             </div>
             <div className={`mt-4 inline-block px-3 py-1 rounded-full text-sm font-semibold ${classInfo.availableSeats <= 0 ? 'bg-red-100 text-red-600' : 'bg-green-100 text-green-700'}`}>
-              {classInfo.availableSeats <= 0 ? 'Popunjeno' : `${classInfo.availableSeats}/${classInfo.totalSeats} slobodnih mjesta`}
+              {classInfo.availableSeats <= 0 ? 'Popunjeno' : `${classInfo.availableSeats}/${classInfo.totalSeats} slobodnih`}
             </div>
           </div>
         )}

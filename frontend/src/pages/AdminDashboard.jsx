@@ -59,7 +59,8 @@ export default function AdminDashboard() {
   }
 
   const totalSeats = classes.reduce((sum, c) => sum + (c.totalSeats || 0), 0)
-  const bookedSeats = classes.reduce((sum, c) => sum + ((c.totalSeats || 0) - (c.availableSeats || 0)), 0)
+  const availableSeats = classes.reduce((sum, c) => sum + (c.availableSeats || 0), 0)
+  const takenSeats = totalSeats - availableSeats
 
   return (
     <div className="min-h-screen bg-dark-50">
@@ -105,8 +106,8 @@ export default function AdminDashboard() {
               </svg>
             </div>
             <div>
-              <div className="text-2xl font-bold text-dark-800">{bookedSeats}</div>
-              <div className="text-dark-500 text-sm">Ukupno rezervacija</div>
+              <div className="text-2xl font-bold text-dark-800">{takenSeats}</div>
+              <div className="text-dark-500 text-sm">Zauzeto mjesta</div>
             </div>
           </div>
 
@@ -117,8 +118,8 @@ export default function AdminDashboard() {
               </svg>
             </div>
             <div>
-              <div className="text-2xl font-bold text-dark-800">{totalSeats}</div>
-              <div className="text-dark-500 text-sm">Ukupno mjesta</div>
+              <div className="text-2xl font-bold text-dark-800">{availableSeats}</div>
+              <div className="text-dark-500 text-sm">Slobodnih mjesta</div>
             </div>
           </div>
         </div>
@@ -163,7 +164,6 @@ export default function AdminDashboard() {
         ) : (
           <div className="grid gap-4">
             {classes.map((cls) => {
-              const booked = (cls.totalSeats || 0) - (cls.availableSeats || 0)
               const isFull = cls.availableSeats <= 0
               return (
                 <div
@@ -186,7 +186,7 @@ export default function AdminDashboard() {
                       </p>
                       <div className="flex items-center gap-3 mt-1">
                         <span className={`text-sm font-medium ${isFull ? 'text-red-500' : 'text-green-600'}`}>
-                          {booked}/{cls.totalSeats} rezervirano
+                          {cls.availableSeats}/{cls.totalSeats} slobodnih
                         </span>
                         {cls.instructor && (
                           <span className="text-dark-400 text-sm">• {cls.instructor}</span>

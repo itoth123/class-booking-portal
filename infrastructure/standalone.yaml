@@ -354,6 +354,7 @@ Resources:
                           'email': body['email'],
                           'phone': body.get('phone', ''),
                           'notes': body.get('notes', ''),
+                          'status': 'pending',
                           'bookedAt': now,
                       }
 
@@ -494,6 +495,48 @@ Resources:
 
                       classes_table.delete_item(Key={'classId': class_id})
                       return resp(200, {'message': 'Deleted'})
+
+                  # PUT /admin/bookings/{id} - confirm or deny a booking
+                  if method == 'PUT' and path == '/admin/bookings/{id}':
+                      booking_id = path_params.get('id')
+                      result = bookings_table.get_item(Key={'bookingId': booking_id})
+                      if 'Item' not in result:
+                          return resp(404, {'error': 'Booking not found'})
+
+                      body = json.loads(event.get('body', '{}'))
+                      new_status = body.get('status')
+                      if new_status not in ('confirmed', 'denied'):
+                          return resp(400, {'error': 'Status must be confirmed or denied'})
+
+                      booking = result['Item']
+                      old_status = booking.get('status', 'pending')
+                      now = datetime.utcnow().isoformat()
+
+                      if new_status == 'denied' and old_status != 'denied':
+                          classes_table.update_item(
+                              Key={'classId': booking['classId']},
+                              UpdateExpression='SET availableSeats = availableSeats + :one, updatedAt = :now',
+                              ExpressionAttributeValues={':one': 1, ':now': now},
+                          )
+                      elif new_status != 'denied' and old_status == 'denied':
+                          try:
+                              classes_table.update_item(
+                                  Key={'classId': booking['classId']},
+                                  UpdateExpression='SET availableSeats = availableSeats - :one, updatedAt = :now',
+                                  ConditionExpression='availableSeats > :zero',
+                                  ExpressionAttributeValues={':one': 1, ':zero': 0, ':now': now},
+                              )
+                          except dynamodb.meta.client.exceptions.ConditionalCheckFailedException:
+                              return resp(409, {'error': 'Nema slobodnih mjesta za ponovnu potvrdu'})
+
+                      bookings_table.update_item(
+                          Key={'bookingId': booking_id},
+                          UpdateExpression='SET #s = :status, updatedAt = :now',
+                          ExpressionAttributeNames={'#s': 'status'},
+                          ExpressionAttributeValues={':status': new_status, ':now': now},
+                      )
+
+                      return resp(200, {'message': f'Booking {new_status}', 'status': new_status})
 
                   # DELETE /admin/bookings/{id} - cancel a single booking
                   if method == 'DELETE' and path == '/admin/bookings/{id}':
@@ -872,7 +915,7 @@ Resources:
           - StatusCode: 200
             ResponseParameters:
               method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
-              method.response.header.Access-Control-Allow-Methods: "'DELETE,OPTIONS'"
+              method.response.header.Access-Control-Allow-Methods: "'PUT,DELETE,OPTIONS'"
               method.response.header.Access-Control-Allow-Origin: "'*'"
             ResponseTemplates:
               application/json: ''
@@ -884,6 +927,21 @@ Resources:
             method.response.header.Access-Control-Allow-Headers: true
             method.response.header.Access-Control-Allow-Methods: true
             method.response.header.Access-Control-Allow-Origin: true
+
+  AdminBookingIdPut:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BookingApi
+      ResourceId: !Ref AdminBookingIdResource
+      HttpMethod: PUT
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref CognitoAuthorizer
+      RequestParameters:
+        method.request.path.id: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations"
 
   AdminBookingIdDelete:
     Type: AWS::ApiGateway::Method
@@ -903,7 +961,7 @@ Resources:
   # ---------------------------------------------------------------------------
   # DEPLOYMENT
   # ---------------------------------------------------------------------------
-  ApiDeployment:
+  ApiDeploymentV2:
     Type: AWS::ApiGateway::Deployment
     DependsOn:
       - ClassesGet
@@ -919,16 +977,18 @@ Resources:
       - AdminClassIdPut
       - AdminClassIdDelete
       - AdminClassIdOptions
+      - AdminBookingIdPut
       - AdminBookingIdDelete
       - AdminBookingIdOptions
     Properties:
       RestApiId: !Ref BookingApi
+      Description: "Deployment with booking status support"
 
   ApiStage:
     Type: AWS::ApiGateway::Stage
     Properties:
       RestApiId: !Ref BookingApi
-      DeploymentId: !Ref ApiDeployment
+      DeploymentId: !Ref ApiDeploymentV2
       StageName: !Ref Environment
       MethodSettings:
         - ResourcePath: "/*"

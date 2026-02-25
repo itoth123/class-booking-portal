@@ -97,7 +97,7 @@ export default function ClassList() {
                       )}
                     </div>
                     <div className={`px-3 py-1 rounded-full text-sm font-semibold ${isFull ? 'bg-red-100 text-red-600' : 'bg-green-100 text-green-700'}`}>
-                      {isFull ? 'Popunjeno' : `${cls.availableSeats}/${cls.totalSeats} mjesta`}
+                      {isFull ? 'Popunjeno' : `${cls.availableSeats}/${cls.totalSeats} slobodnih`}
                     </div>
                   </div>
 

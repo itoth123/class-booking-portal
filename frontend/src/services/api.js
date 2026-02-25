@@ -90,6 +90,16 @@ export const adminApi = {
     return handleResponse(response)
   },
 
+  updateBookingStatus: async (bookingId, status) => {
+    const headers = await getAuthHeaders()
+    const response = await fetch(`${API_BASE}/admin/bookings/${bookingId}`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ status }),
+    })
+    return handleResponse(response)
+  },
+
   cancelBooking: async (bookingId) => {
     const headers = await getAuthHeaders()
     const response = await fetch(`${API_BASE}/admin/bookings/${bookingId}`, {

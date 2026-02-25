@@ -26,6 +26,7 @@ print_usage() {
     echo "  -r, --region        AWS region. Default: us-east-1"
     echo "  -p, --profile       AWS profile. Default: sit"
     echo "  -d, --delete        Delete the stack"
+    echo "  -s, --skip-frontend Skip frontend build & deploy"
     echo "  -h, --help          Show this help message"
     echo ""
     echo "Environment variables:"
@@ -35,9 +36,10 @@ print_usage() {
     echo "  AWS_PROFILE         AWS profile. Default: sit"
     echo ""
     echo "Examples:"
-    echo "  $0 -e dev"
-    echo "  $0 -e prod -r us-east-1 -p production"
-    echo "  $0 -e dev -d  # Delete dev stack"
+    echo "  $0 -e dev                       # Full deploy (infra + frontend)"
+    echo "  $0 -e dev -s                    # Infra only, skip frontend"
+    echo "  $0 -e prod -r us-east-1 -p prod # Production deploy"
+    echo "  $0 -e dev -d                    # Delete dev stack"
 }
 
 log_info() {
@@ -54,6 +56,7 @@ log_error() {
 
 # Parse arguments
 DELETE_STACK=false
+SKIP_FRONTEND=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -71,6 +74,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         -d|--delete)
             DELETE_STACK=true
+            shift
+            ;;
+        -s|--skip-frontend)
+            SKIP_FRONTEND=true
             shift
             ;;
         -h|--help)
@@ -132,16 +139,19 @@ log_info "Environment: ${ENVIRONMENT}"
 
 # Template location
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TEMPLATE_FILE="${SCRIPT_DIR}/../infrastructure/standalone.yaml"
+PROJECT_DIR="${SCRIPT_DIR}/.."
+TEMPLATE_FILE="${PROJECT_DIR}/infrastructure/standalone.yaml"
+FRONTEND_DIR="${PROJECT_DIR}/frontend"
 
-# Validate template
+# =========================================================================
+# STEP 1: Deploy CloudFormation stack
+# =========================================================================
 log_info "Validating CloudFormation template..."
 aws cloudformation validate-template \
     --template-body "file://${TEMPLATE_FILE}" \
     --region "${AWS_REGION}" \
     --profile "${AWS_PROFILE}" > /dev/null
 
-# Deploy stack
 log_info "Deploying stack: ${STACK_NAME}"
 
 aws cloudformation deploy \
@@ -158,9 +168,30 @@ aws cloudformation deploy \
         Environment="${ENVIRONMENT}" \
         ManagedBy=CloudFormation
 
-# Get outputs
-log_info "Deployment completed! Stack outputs:"
+log_info "Stack deployed successfully!"
 echo ""
+
+# =========================================================================
+# STEP 2: Fetch stack outputs
+# =========================================================================
+log_info "Fetching stack outputs..."
+
+get_output() {
+    aws cloudformation describe-stacks \
+        --stack-name "${STACK_NAME}" \
+        --region "${AWS_REGION}" \
+        --profile "${AWS_PROFILE}" \
+        --query "Stacks[0].Outputs[?OutputKey==\`$1\`].OutputValue" \
+        --output text
+}
+
+API_ENDPOINT=$(get_output ApiEndpoint)
+USER_POOL_ID=$(get_output UserPoolId)
+USER_POOL_CLIENT_ID=$(get_output UserPoolClientId)
+FRONTEND_BUCKET=$(get_output FrontendBucket)
+CLOUDFRONT_DIST_ID=$(get_output CloudFrontDistributionId)
+WEBSITE_URL=$(get_output WebsiteURL)
+
 aws cloudformation describe-stacks \
     --stack-name "${STACK_NAME}" \
     --region "${AWS_REGION}" \
@@ -168,33 +199,12 @@ aws cloudformation describe-stacks \
     --query 'Stacks[0].Outputs[*].[OutputKey,OutputValue]' \
     --output table
 
-# Create frontend config
-log_info "Creating frontend configuration..."
-API_ENDPOINT=$(aws cloudformation describe-stacks \
-    --stack-name "${STACK_NAME}" \
-    --region "${AWS_REGION}" \
-    --profile "${AWS_PROFILE}" \
-    --query 'Stacks[0].Outputs[?OutputKey==`ApiEndpoint`].OutputValue' \
-    --output text)
+# =========================================================================
+# STEP 3: Update frontend config
+# =========================================================================
+log_info "Updating frontend configuration..."
 
-USER_POOL_ID=$(aws cloudformation describe-stacks \
-    --stack-name "${STACK_NAME}" \
-    --region "${AWS_REGION}" \
-    --profile "${AWS_PROFILE}" \
-    --query 'Stacks[0].Outputs[?OutputKey==`UserPoolId`].OutputValue' \
-    --output text)
-
-USER_POOL_CLIENT_ID=$(aws cloudformation describe-stacks \
-    --stack-name "${STACK_NAME}" \
-    --region "${AWS_REGION}" \
-    --profile "${AWS_PROFILE}" \
-    --query 'Stacks[0].Outputs[?OutputKey==`UserPoolClientId`].OutputValue' \
-    --output text)
-
-CONFIG_DIR="${SCRIPT_DIR}/../frontend"
-mkdir -p "${CONFIG_DIR}"
-
-cat > "${CONFIG_DIR}/config.json" << EOF
+cat > "${FRONTEND_DIR}/config.json" << EOF
 {
   "apiEndpoint": "${API_ENDPOINT}",
   "cognitoUserPoolId": "${USER_POOL_ID}",
@@ -203,21 +213,63 @@ cat > "${CONFIG_DIR}/config.json" << EOF
 }
 EOF
 
-log_info "Frontend config saved to: ${CONFIG_DIR}/config.json"
+cat > "${FRONTEND_DIR}/src/config.js" << EOF
+export const config = {
+  apiEndpoint: '${API_ENDPOINT}',
 
+  cognito: {
+    region: '${AWS_REGION}',
+    userPoolId: '${USER_POOL_ID}',
+    clientId: '${USER_POOL_CLIENT_ID}',
+  }
+}
+EOF
+
+log_info "Frontend config.json and src/config.js updated"
+
+# =========================================================================
+# STEP 4: Build & deploy frontend
+# =========================================================================
+if [ "$SKIP_FRONTEND" = true ]; then
+    log_warn "Skipping frontend build & deploy (-s flag)"
+else
+    log_info "Installing frontend dependencies..."
+    cd "${FRONTEND_DIR}"
+    npm install --silent
+
+    log_info "Building frontend..."
+    npm run build
+
+    log_info "Uploading frontend to S3: ${FRONTEND_BUCKET}..."
+    aws s3 sync dist/ "s3://${FRONTEND_BUCKET}" --delete --profile "${AWS_PROFILE}"
+
+    log_info "Invalidating CloudFront cache..."
+    aws cloudfront create-invalidation \
+        --profile "${AWS_PROFILE}" \
+        --distribution-id "${CLOUDFRONT_DIST_ID}" \
+        --paths "/*" > /dev/null
+
+    log_info "Frontend deployed and CloudFront cache invalidated!"
+fi
+
+# =========================================================================
+# DONE
+# =========================================================================
 echo ""
-log_info "=== Deployment Summary ==="
-echo "AWS Profile: ${AWS_PROFILE}"
+log_info "=== Deployment Complete ==="
+echo "Website URL:  ${WEBSITE_URL}"
 echo "API Endpoint: ${API_ENDPOINT}"
 echo "User Pool ID: ${USER_POOL_ID}"
-echo "Client ID: ${USER_POOL_CLIENT_ID}"
+echo "Client ID:    ${USER_POOL_CLIENT_ID}"
+echo "S3 Bucket:    ${FRONTEND_BUCKET}"
+echo "CloudFront:   ${CLOUDFRONT_DIST_ID}"
 echo ""
-log_info "Next steps:"
-echo "1. Create an admin user in Cognito:"
-echo "   aws cognito-idp admin-create-user --profile ${AWS_PROFILE} --user-pool-id ${USER_POOL_ID} --username YOUR_EMAIL --user-attributes Name=email,Value=YOUR_EMAIL Name=email_verified,Value=true"
+log_info "To create an admin user:"
+echo "  aws cognito-idp admin-create-user --profile ${AWS_PROFILE} \\"
+echo "    --user-pool-id ${USER_POOL_ID} --username YOUR_EMAIL \\"
+echo "    --user-attributes Name=email,Value=YOUR_EMAIL Name=email_verified,Value=true \\"
+echo "    --temporary-password 'TempPass123!'"
 echo ""
-echo "2. Set permanent password:"
-echo "   aws cognito-idp admin-set-user-password --profile ${AWS_PROFILE} --user-pool-id ${USER_POOL_ID} --username YOUR_EMAIL --password 'YourPassword123!' --permanent"
-echo ""
-echo "3. Upload frontend to S3 (after building):"
-echo "   aws s3 sync ./frontend/dist s3://\$(aws cloudformation describe-stacks --profile ${AWS_PROFILE} --stack-name ${STACK_NAME} --query 'Stacks[0].Outputs[?OutputKey==\`FrontendBucket\`].OutputValue' --output text)"
+echo "  aws cognito-idp admin-set-user-password --profile ${AWS_PROFILE} \\"
+echo "    --user-pool-id ${USER_POOL_ID} --username YOUR_EMAIL \\"
+echo "    --password 'YourPassword123!' --permanent"

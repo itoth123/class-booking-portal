@@ -30,7 +30,10 @@ export default function BookingSuccess() {
             Hvala{firstName ? `, ${firstName}` : ''}!
           </h2>
           <p className="text-dark-600 text-lg mb-2">
-            Vaša rezervacija za <strong>{className}</strong> je potvrđena.
+            Vaša rezervacija za <strong>{className}</strong> je zaprimljena.
+          </p>
+          <p className="text-dark-500 text-sm mb-2">
+            Rezervacija je na čekanju dok administrator ne potvrdi uplatu.
           </p>
           <p className="text-dark-400 text-sm mb-8">
             Broj rezervacije: <span className="font-mono text-dark-600">{bookingId}</span>
