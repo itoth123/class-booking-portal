@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { publicApi } from '../services/api'
+import ClassCalendar from '../components/ClassCalendar'
 
 export default function ClassList() {
   const [classes, setClasses] = useState([])
@@ -35,6 +36,11 @@ export default function ClassList() {
     })
   }
 
+  const now = new Date()
+  const upcomingClasses = classes.filter(
+    (cls) => !cls.dateTime || new Date(cls.dateTime) >= now
+  )
+
   return (
     <div className="min-h-screen bg-dark-50">
       {/* Header */}
@@ -65,7 +71,7 @@ export default function ClassList() {
           <div className="flex justify-center py-16">
             <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-primary-500"></div>
           </div>
-        ) : classes.length === 0 ? (
+        ) : upcomingClasses.length === 0 ? (
           <div className="card text-center py-16">
             <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-primary-100 flex items-center justify-center">
               <svg className="w-10 h-10 text-primary-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -76,13 +82,14 @@ export default function ClassList() {
             <p className="text-dark-500">Provjerite ponovo uskoro!</p>
           </div>
         ) : (
+          <>
           <div className="grid gap-6 md:grid-cols-2">
-            {classes.map((cls) => {
+            {upcomingClasses.map((cls) => {
               const isFull = cls.availableSeats <= 0
               return (
                 <div
                   key={cls.classId}
-                  className={`card hover:shadow-xl transition-all duration-300 ${isFull ? 'opacity-70' : 'hover:border-primary-200'}`}
+                  className={`card hover:shadow-xl transition-all duration-300 flex flex-col ${isFull ? 'opacity-70' : 'hover:border-primary-200'}`}
                 >
                   <div className="flex items-start justify-between mb-4">
                     <div className="flex-1">
@@ -134,17 +141,26 @@ export default function ClassList() {
                   </div>
 
                   {isFull ? (
-                    <button disabled className="btn w-full bg-dark-200 text-dark-500 cursor-not-allowed">
+                    <button disabled className="btn w-full bg-dark-200 text-dark-500 cursor-not-allowed mt-auto">
                       Nema slobodnih mjesta
                     </button>
                   ) : (
-                    <Link to={`/book/${cls.classId}`} className="btn-primary w-full text-center block">
+                    <Link to={`/book/${cls.classId}`} className="btn-primary w-full text-center block mt-auto">
                       Rezerviraj mjesto
                     </Link>
                   )}
                 </div>
               )
             })}
+          </div>
+
+          </>
+        )}
+
+        {/* Calendar view - always shown when there are classes */}
+        {!loading && classes.length > 0 && (
+          <div className="mt-8">
+            <ClassCalendar classes={classes} />
           </div>
         )}
       </main>
