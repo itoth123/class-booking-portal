@@ -1,0 +1,1 @@
+{"statusCode": 200, "body": "{\"processed\": 1, \"emails_sent\": 1, \"errors\": [\"Failed to send email to mboljkovac@gmail.com for booking 2865b4b8-e081-497b-bcc2-4c7dc2242381: An error occurred (MessageRejected) when calling the SendEmail operation: Email address is not verified. The following identities failed the check in region US-EAST-1: mboljkovac@gmail.com\"]}"}

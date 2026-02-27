@@ -71,6 +71,35 @@ Resources:
         - Key: Project
           Value: !Ref ProjectName
 
+  FeedbackTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub "${ProjectName}-${Environment}-feedback"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: bookingId
+          AttributeType: S
+        - AttributeName: classId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: bookingId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: classId-index
+          KeySchema:
+            - AttributeName: classId
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: !If [IsProd, true, false]
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
   # ===========================================================================
   # AUTHENTICATION - Cognito (admin only)
   # ===========================================================================
@@ -158,6 +187,54 @@ Resources:
                   - !Sub "${ClassesTable.Arn}/index/*"
                   - !GetAtt BookingsTable.Arn
                   - !Sub "${BookingsTable.Arn}/index/*"
+                  - !GetAtt FeedbackTable.Arn
+                  - !Sub "${FeedbackTable.Arn}/index/*"
+        - PolicyName: SESAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ses:SendEmail
+                Resource: "*"
+
+  EmailDispatcherRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-${Environment}-email-dispatcher-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBReadAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt ClassesTable.Arn
+                  - !Sub "${ClassesTable.Arn}/index/*"
+                  - !GetAtt BookingsTable.Arn
+                  - !Sub "${BookingsTable.Arn}/index/*"
+        - PolicyName: DynamoDBWriteClassesAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !GetAtt ClassesTable.Arn
         - PolicyName: SESAccess
           PolicyDocument:
             Version: '2012-10-17'
@@ -181,387 +258,11 @@ Resources:
           CLASSES_TABLE: !Ref ClassesTable
           BOOKINGS_TABLE: !Ref BookingsTable
           ENVIRONMENT: !Ref Environment
+          FEEDBACK_TABLE: !Ref FeedbackTable
           ADMIN_EMAIL: ivatoth@gmail.com
           SENDER_EMAIL: noreply@doseof.today
           AWS_SES_REGION: us-east-1
-      Code:
-        ZipFile: |
-          import json
-          import boto3
-          import uuid
-          import os
-          from datetime import datetime
-          from decimal import Decimal
-
-          dynamodb = boto3.resource('dynamodb')
-          classes_table = dynamodb.Table(os.environ['CLASSES_TABLE'])
-          bookings_table = dynamodb.Table(os.environ['BOOKINGS_TABLE'])
-          ses_client = boto3.client('ses', region_name=os.environ.get('AWS_SES_REGION', 'us-east-1'))
-          ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL', '')
-          SENDER_EMAIL = os.environ.get('SENDER_EMAIL', ADMIN_EMAIL)
-
-          def send_booking_notification(booking, class_info):
-              if not ADMIN_EMAIL:
-                  return
-              try:
-                  title = class_info.get('title', 'N/A')
-                  dt = class_info.get('dateTime', 'N/A')
-                  loc = class_info.get('location', 'N/A')
-                  avail = class_info.get('availableSeats', 0)
-                  total = class_info.get('totalSeats', 0)
-                  name = f"{booking['firstName']} {booking['lastName']}"
-
-                  subject = f"Nova rezervacija: {name} - {title}"
-                  body_text = (
-                      f"Nova rezervacija za tečaj!\n\n"
-                      f"TEČAJ: {title}\n"
-                      f"Datum: {dt}\n"
-                      f"Lokacija: {loc}\n"
-                      f"Preostalo mjesta: {avail - 1}/{total}\n\n"
-                      f"PODACI O POLAZNIKU:\n"
-                      f"Ime i prezime: {name}\n"
-                      f"Email: {booking['email']}\n"
-                      f"Telefon: {booking.get('phone', '-')}\n"
-                      f"Napomena: {booking.get('notes', '-')}\n\n"
-                      f"Booking ID: {booking['bookingId']}\n"
-                  )
-                  body_html = (
-                      f"<h2>Nova rezervacija za tečaj</h2>"
-                      f"<table style='border-collapse:collapse;'>"
-                      f"<tr><td style='padding:4px 12px;font-weight:bold;'>Tečaj:</td><td style='padding:4px 12px;'>{title}</td></tr>"
-                      f"<tr><td style='padding:4px 12px;font-weight:bold;'>Datum:</td><td style='padding:4px 12px;'>{dt}</td></tr>"
-                      f"<tr><td style='padding:4px 12px;font-weight:bold;'>Lokacija:</td><td style='padding:4px 12px;'>{loc}</td></tr>"
-                      f"<tr><td style='padding:4px 12px;font-weight:bold;'>Preostalo mjesta:</td><td style='padding:4px 12px;'>{avail - 1}/{total}</td></tr>"
-                      f"</table>"
-                      f"<hr style='margin:16px 0;'/>"
-                      f"<h3>Podaci o polazniku</h3>"
-                      f"<table style='border-collapse:collapse;'>"
-                      f"<tr><td style='padding:4px 12px;font-weight:bold;'>Ime i prezime:</td><td style='padding:4px 12px;'>{name}</td></tr>"
-                      f"<tr><td style='padding:4px 12px;font-weight:bold;'>Email:</td><td style='padding:4px 12px;'><a href='mailto:{booking['email']}'>{booking['email']}</a></td></tr>"
-                      f"<tr><td style='padding:4px 12px;font-weight:bold;'>Telefon:</td><td style='padding:4px 12px;'>{booking.get('phone', '-')}</td></tr>"
-                      f"<tr><td style='padding:4px 12px;font-weight:bold;'>Napomena:</td><td style='padding:4px 12px;'>{booking.get('notes', '-')}</td></tr>"
-                      f"</table>"
-                      f"<p style='color:#888;font-size:12px;margin-top:16px;'>Booking ID: {booking['bookingId']}</p>"
-                  )
-
-                  ses_client.send_email(
-                      Source=SENDER_EMAIL,
-                      Destination={'ToAddresses': [ADMIN_EMAIL]},
-                      Message={
-                          'Subject': {'Data': subject, 'Charset': 'UTF-8'},
-                          'Body': {
-                              'Text': {'Data': body_text, 'Charset': 'UTF-8'},
-                              'Html': {'Data': body_html, 'Charset': 'UTF-8'},
-                          }
-                      }
-                  )
-              except Exception as e:
-                  print(f"Failed to send email notification: {e}")
-
-          def json_serial(obj):
-              if isinstance(obj, Decimal):
-                  return int(obj) if obj == int(obj) else float(obj)
-              if isinstance(obj, datetime):
-                  return obj.isoformat()
-              raise TypeError(f"Type {type(obj)} not serializable")
-
-          def resp(status_code, body):
-              return {
-                  'statusCode': status_code,
-                  'headers': {
-                      'Content-Type': 'application/json',
-                      'Access-Control-Allow-Origin': '*',
-                      'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-                      'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS'
-                  },
-                  'body': json.dumps(body, default=json_serial)
-              }
-
-          def handler(event, context):
-              method = event.get('httpMethod', '')
-              path = event.get('resource', '')
-              path_params = event.get('pathParameters') or {}
-
-              if method == 'OPTIONS':
-                  return resp(200, {'message': 'OK'})
-
-              try:
-                  # === PUBLIC ENDPOINTS ===
-
-                  # GET /classes - list available classes (public)
-                  if method == 'GET' and path == '/classes':
-                      result = classes_table.scan()
-                      items = result.get('Items', [])
-                      public_classes = []
-                      for c in items:
-                          public_classes.append({
-                              'classId': c['classId'],
-                              'title': c.get('title', ''),
-                              'description': c.get('description', ''),
-                              'instructor': c.get('instructor', ''),
-                              'dateTime': c.get('dateTime', ''),
-                              'duration': c.get('duration', ''),
-                              'location': c.get('location', ''),
-                              'totalSeats': c.get('totalSeats', 0),
-                              'availableSeats': c.get('availableSeats', 0),
-                          })
-                      return resp(200, {'classes': public_classes})
-
-                  # GET /classes/{id} - single class detail (public)
-                  if method == 'GET' and path == '/classes/{id}':
-                      class_id = path_params.get('id')
-                      result = classes_table.get_item(Key={'classId': class_id})
-                      if 'Item' not in result:
-                          return resp(404, {'error': 'Class not found'})
-                      c = result['Item']
-                      return resp(200, {
-                          'classId': c['classId'],
-                          'title': c.get('title', ''),
-                          'description': c.get('description', ''),
-                          'instructor': c.get('instructor', ''),
-                          'dateTime': c.get('dateTime', ''),
-                          'duration': c.get('duration', ''),
-                          'location': c.get('location', ''),
-                          'totalSeats': c.get('totalSeats', 0),
-                          'availableSeats': c.get('availableSeats', 0),
-                      })
-
-                  # POST /classes/{id}/book - book a seat (public)
-                  if method == 'POST' and path == '/classes/{id}/book':
-                      class_id = path_params.get('id')
-                      body = json.loads(event.get('body', '{}'))
-
-                      required = ['firstName', 'lastName', 'email']
-                      missing = [f for f in required if not body.get(f)]
-                      if missing:
-                          return resp(400, {'error': f'Missing required fields: {missing}'})
-
-                      result = classes_table.get_item(Key={'classId': class_id})
-                      if 'Item' not in result:
-                          return resp(404, {'error': 'Class not found'})
-
-                      cls = result['Item']
-                      available = cls.get('availableSeats', 0)
-                      if available <= 0:
-                          return resp(409, {'error': 'No seats available'})
-
-                      now = datetime.utcnow().isoformat()
-                      booking = {
-                          'bookingId': str(uuid.uuid4()),
-                          'classId': class_id,
-                          'firstName': body['firstName'],
-                          'lastName': body['lastName'],
-                          'email': body['email'],
-                          'phone': body.get('phone', ''),
-                          'notes': body.get('notes', ''),
-                          'status': 'pending',
-                          'bookedAt': now,
-                      }
-
-                      try:
-                          classes_table.update_item(
-                              Key={'classId': class_id},
-                              UpdateExpression='SET availableSeats = availableSeats - :one, updatedAt = :now',
-                              ConditionExpression='availableSeats > :zero',
-                              ExpressionAttributeValues={
-                                  ':one': 1,
-                                  ':zero': 0,
-                                  ':now': now,
-                              },
-                          )
-                      except dynamodb.meta.client.exceptions.ConditionalCheckFailedException:
-                          return resp(409, {'error': 'No seats available'})
-
-                      bookings_table.put_item(Item=booking)
-
-                      send_booking_notification(booking, cls)
-
-                      return resp(201, {
-                          'message': 'Booking confirmed',
-                          'bookingId': booking['bookingId'],
-                          'className': cls.get('title', ''),
-                      })
-
-                  # === ADMIN ENDPOINTS (protected by Cognito authorizer) ===
-
-                  # GET /admin/classes - list all classes with full details
-                  if method == 'GET' and path == '/admin/classes':
-                      result = classes_table.scan()
-                      return resp(200, {
-                          'classes': result.get('Items', []),
-                          'count': result.get('Count', 0)
-                      })
-
-                  # POST /admin/classes - create a class
-                  if method == 'POST' and path == '/admin/classes':
-                      body = json.loads(event.get('body', '{}'))
-                      required = ['title', 'totalSeats']
-                      missing = [f for f in required if f not in body]
-                      if missing:
-                          return resp(400, {'error': f'Missing: {missing}'})
-
-                      now = datetime.utcnow().isoformat()
-                      total = int(body['totalSeats'])
-                      item = {
-                          'classId': str(uuid.uuid4()),
-                          'title': body['title'],
-                          'description': body.get('description', ''),
-                          'instructor': body.get('instructor', ''),
-                          'dateTime': body.get('dateTime', ''),
-                          'duration': body.get('duration', ''),
-                          'location': body.get('location', ''),
-                          'totalSeats': total,
-                          'availableSeats': total,
-                          'createdAt': now,
-                          'updatedAt': now,
-                      }
-                      classes_table.put_item(Item=item)
-                      return resp(201, item)
-
-                  # GET /admin/classes/{id} - get class with bookings
-                  if method == 'GET' and path == '/admin/classes/{id}':
-                      class_id = path_params.get('id')
-                      result = classes_table.get_item(Key={'classId': class_id})
-                      if 'Item' not in result:
-                          return resp(404, {'error': 'Class not found'})
-
-                      bookings_result = bookings_table.query(
-                          IndexName='classId-index',
-                          KeyConditionExpression=boto3.dynamodb.conditions.Key('classId').eq(class_id)
-                      )
-
-                      cls = result['Item']
-                      cls['bookings'] = bookings_result.get('Items', [])
-                      return resp(200, cls)
-
-                  # PUT /admin/classes/{id} - update a class
-                  if method == 'PUT' and path == '/admin/classes/{id}':
-                      class_id = path_params.get('id')
-                      existing = classes_table.get_item(Key={'classId': class_id})
-                      if 'Item' not in existing:
-                          return resp(404, {'error': 'Class not found'})
-
-                      body = json.loads(event.get('body', '{}'))
-                      now = datetime.utcnow().isoformat()
-                      old = existing['Item']
-
-                      update_expr = 'SET updatedAt = :now'
-                      expr_vals = {':now': now}
-                      expr_names = {}
-
-                      for field in ['title', 'description', 'instructor', 'dateTime', 'duration', 'location']:
-                          if field in body:
-                              attr_name = f'#{field}'
-                              expr_names[attr_name] = field
-                              update_expr += f', {attr_name} = :{field}'
-                              expr_vals[f':{field}'] = body[field]
-
-                      if 'totalSeats' in body:
-                          new_total = int(body['totalSeats'])
-                          old_total = old.get('totalSeats', 0)
-                          old_available = old.get('availableSeats', 0)
-                          new_available = old_available + (new_total - old_total)
-                          if new_available < 0:
-                              return resp(400, {'error': 'Cannot reduce seats below number of bookings'})
-                          update_expr += ', totalSeats = :totalSeats, availableSeats = :availableSeats'
-                          expr_vals[':totalSeats'] = new_total
-                          expr_vals[':availableSeats'] = new_available
-
-                      update_kwargs = {
-                          'Key': {'classId': class_id},
-                          'UpdateExpression': update_expr,
-                          'ExpressionAttributeValues': expr_vals,
-                          'ReturnValues': 'ALL_NEW',
-                      }
-                      if expr_names:
-                          update_kwargs['ExpressionAttributeNames'] = expr_names
-
-                      result = classes_table.update_item(**update_kwargs)
-                      return resp(200, result['Attributes'])
-
-                  # DELETE /admin/classes/{id} - delete a class and its bookings
-                  if method == 'DELETE' and path == '/admin/classes/{id}':
-                      class_id = path_params.get('id')
-                      existing = classes_table.get_item(Key={'classId': class_id})
-                      if 'Item' not in existing:
-                          return resp(404, {'error': 'Class not found'})
-
-                      bookings_result = bookings_table.query(
-                          IndexName='classId-index',
-                          KeyConditionExpression=boto3.dynamodb.conditions.Key('classId').eq(class_id)
-                      )
-                      for b in bookings_result.get('Items', []):
-                          bookings_table.delete_item(Key={'bookingId': b['bookingId']})
-
-                      classes_table.delete_item(Key={'classId': class_id})
-                      return resp(200, {'message': 'Deleted'})
-
-                  # PUT /admin/bookings/{id} - confirm or deny a booking
-                  if method == 'PUT' and path == '/admin/bookings/{id}':
-                      booking_id = path_params.get('id')
-                      result = bookings_table.get_item(Key={'bookingId': booking_id})
-                      if 'Item' not in result:
-                          return resp(404, {'error': 'Booking not found'})
-
-                      body = json.loads(event.get('body', '{}'))
-                      new_status = body.get('status')
-                      if new_status not in ('confirmed', 'denied'):
-                          return resp(400, {'error': 'Status must be confirmed or denied'})
-
-                      booking = result['Item']
-                      old_status = booking.get('status', 'pending')
-                      now = datetime.utcnow().isoformat()
-
-                      if new_status == 'denied' and old_status != 'denied':
-                          classes_table.update_item(
-                              Key={'classId': booking['classId']},
-                              UpdateExpression='SET availableSeats = availableSeats + :one, updatedAt = :now',
-                              ExpressionAttributeValues={':one': 1, ':now': now},
-                          )
-                      elif new_status != 'denied' and old_status == 'denied':
-                          try:
-                              classes_table.update_item(
-                                  Key={'classId': booking['classId']},
-                                  UpdateExpression='SET availableSeats = availableSeats - :one, updatedAt = :now',
-                                  ConditionExpression='availableSeats > :zero',
-                                  ExpressionAttributeValues={':one': 1, ':zero': 0, ':now': now},
-                              )
-                          except dynamodb.meta.client.exceptions.ConditionalCheckFailedException:
-                              return resp(409, {'error': 'Nema slobodnih mjesta za ponovnu potvrdu'})
-
-                      bookings_table.update_item(
-                          Key={'bookingId': booking_id},
-                          UpdateExpression='SET #s = :status, updatedAt = :now',
-                          ExpressionAttributeNames={'#s': 'status'},
-                          ExpressionAttributeValues={':status': new_status, ':now': now},
-                      )
-
-                      return resp(200, {'message': f'Booking {new_status}', 'status': new_status})
-
-                  # DELETE /admin/bookings/{id} - cancel a single booking
-                  if method == 'DELETE' and path == '/admin/bookings/{id}':
-                      booking_id = path_params.get('id')
-                      result = bookings_table.get_item(Key={'bookingId': booking_id})
-                      if 'Item' not in result:
-                          return resp(404, {'error': 'Booking not found'})
-
-                      booking = result['Item']
-                      now = datetime.utcnow().isoformat()
-
-                      classes_table.update_item(
-                          Key={'classId': booking['classId']},
-                          UpdateExpression='SET availableSeats = availableSeats + :one, updatedAt = :now',
-                          ExpressionAttributeValues={':one': 1, ':now': now},
-                      )
-
-                      bookings_table.delete_item(Key={'bookingId': booking_id})
-                      return resp(200, {'message': 'Booking cancelled'})
-
-                  return resp(405, {'error': 'Method not allowed'})
-
-              except Exception as e:
-                  print(f"Error: {e}")
-                  return resp(500, {'error': 'Internal server error'})
+      Code: lambda/api/
       Tags:
         - Key: Project
           Value: !Ref ProjectName
@@ -573,6 +274,49 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: apigateway.amazonaws.com
       SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${BookingApi}/*"
+
+  # ===========================================================================
+  # EMAIL DISPATCHER - Lambda (scheduled feedback emails)
+  # ===========================================================================
+  EmailDispatcherFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${ProjectName}-${Environment}-email-dispatcher"
+      Runtime: python3.11
+      Handler: index.handler
+      Role: !GetAtt EmailDispatcherRole.Arn
+      MemorySize: 256
+      Timeout: 120
+      Environment:
+        Variables:
+          CLASSES_TABLE: !Ref ClassesTable
+          BOOKINGS_TABLE: !Ref BookingsTable
+          SENDER_EMAIL: noreply@doseof.today
+          SITE_DOMAIN: !GetAtt CloudFrontDistribution.DomainName
+          AWS_SES_REGION: us-east-1
+      Code: lambda/email_dispatcher/
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  EmailDispatcherScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${ProjectName}-${Environment}-email-dispatcher-schedule"
+      Description: "Triggers Email Dispatcher Lambda every 60 minutes to send feedback request emails"
+      ScheduleExpression: "rate(60 minutes)"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt EmailDispatcherFunction.Arn
+          Id: EmailDispatcherTarget
+
+  EmailDispatcherInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref EmailDispatcherFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt EmailDispatcherScheduleRule.Arn
 
   # ===========================================================================
   # API GATEWAY
@@ -959,6 +703,239 @@ Resources:
         Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations"
 
   # ---------------------------------------------------------------------------
+  # PUBLIC: /feedback
+  # ---------------------------------------------------------------------------
+  FeedbackResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref BookingApi
+      ParentId: !GetAtt BookingApi.RootResourceId
+      PathPart: feedback
+
+  FeedbackOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BookingApi
+      ResourceId: !Ref FeedbackResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              application/json: ''
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # /feedback/{token}
+  FeedbackTokenResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref BookingApi
+      ParentId: !Ref FeedbackResource
+      PathPart: "{token}"
+
+  FeedbackTokenOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BookingApi
+      ResourceId: !Ref FeedbackTokenResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              application/json: ''
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  FeedbackTokenGet:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BookingApi
+      ResourceId: !Ref FeedbackTokenResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      RequestParameters:
+        method.request.path.token: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations"
+
+  FeedbackTokenPost:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BookingApi
+      ResourceId: !Ref FeedbackTokenResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      RequestParameters:
+        method.request.path.token: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations"
+
+  # ---------------------------------------------------------------------------
+  # PUBLIC: /classes/{id}/reviews
+  # ---------------------------------------------------------------------------
+  ClassIdReviewsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref BookingApi
+      ParentId: !Ref ClassIdResource
+      PathPart: reviews
+
+  ClassIdReviewsOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BookingApi
+      ResourceId: !Ref ClassIdReviewsResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+              method.response.header.Access-Control-Allow-Methods: "'GET,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              application/json: ''
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  ClassIdReviewsGet:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BookingApi
+      ResourceId: !Ref ClassIdReviewsResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      RequestParameters:
+        method.request.path.id: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations"
+
+  # ---------------------------------------------------------------------------
+  # ADMIN: /admin/feedback
+  # ---------------------------------------------------------------------------
+  AdminFeedbackResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref BookingApi
+      ParentId: !Ref AdminResource
+      PathPart: feedback
+
+  AdminFeedbackOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BookingApi
+      ResourceId: !Ref AdminFeedbackResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+              method.response.header.Access-Control-Allow-Methods: "'PUT,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              application/json: ''
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  # /admin/feedback/{id}
+  AdminFeedbackIdResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref BookingApi
+      ParentId: !Ref AdminFeedbackResource
+      PathPart: "{id}"
+
+  AdminFeedbackIdOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BookingApi
+      ResourceId: !Ref AdminFeedbackIdResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,Authorization'"
+              method.response.header.Access-Control-Allow-Methods: "'PUT,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+            ResponseTemplates:
+              application/json: ''
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+            method.response.header.Access-Control-Allow-Origin: true
+
+  AdminFeedbackIdPut:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref BookingApi
+      ResourceId: !Ref AdminFeedbackIdResource
+      HttpMethod: PUT
+      AuthorizationType: COGNITO_USER_POOLS
+      AuthorizerId: !Ref CognitoAuthorizer
+      RequestParameters:
+        method.request.path.id: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunction.Arn}/invocations"
+
+  # ---------------------------------------------------------------------------
   # DEPLOYMENT
   # ---------------------------------------------------------------------------
   ApiDeploymentV2:
@@ -980,6 +957,15 @@ Resources:
       - AdminBookingIdPut
       - AdminBookingIdDelete
       - AdminBookingIdOptions
+      - FeedbackOptions
+      - FeedbackTokenOptions
+      - FeedbackTokenGet
+      - FeedbackTokenPost
+      - ClassIdReviewsOptions
+      - ClassIdReviewsGet
+      - AdminFeedbackOptions
+      - AdminFeedbackIdOptions
+      - AdminFeedbackIdPut
     Properties:
       RestApiId: !Ref BookingApi
       Description: "Deployment with booking status support"
@@ -1107,3 +1093,7 @@ Outputs:
   BookingsTableName:
     Description: DynamoDB bookings table name
     Value: !Ref BookingsTable
+
+  FeedbackTableName:
+    Description: DynamoDB feedback table name
+    Value: !Ref FeedbackTable

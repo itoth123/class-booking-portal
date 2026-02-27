@@ -141,21 +141,43 @@ log_info "Environment: ${ENVIRONMENT}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="${SCRIPT_DIR}/.."
 TEMPLATE_FILE="${PROJECT_DIR}/infrastructure/standalone.yaml"
+PACKAGED_TEMPLATE="${PROJECT_DIR}/infrastructure/packaged.yaml"
 FRONTEND_DIR="${PROJECT_DIR}/frontend"
 
+# S3 bucket for Lambda code packaging
+ARTIFACTS_BUCKET="${PROJECT_NAME}-${ENVIRONMENT}-artifacts-${AWS_ACCOUNT_ID}"
+
 # =========================================================================
-# STEP 1: Deploy CloudFormation stack
+# STEP 0: Ensure artifacts bucket exists
 # =========================================================================
-log_info "Validating CloudFormation template..."
+log_info "Ensuring artifacts S3 bucket exists: ${ARTIFACTS_BUCKET}..."
+if ! aws s3 ls "s3://${ARTIFACTS_BUCKET}" --region "${AWS_REGION}" --profile "${AWS_PROFILE}" 2>/dev/null; then
+    log_info "Creating artifacts bucket..."
+    aws s3 mb "s3://${ARTIFACTS_BUCKET}" --region "${AWS_REGION}" --profile "${AWS_PROFILE}"
+fi
+
+# =========================================================================
+# STEP 1: Package and deploy CloudFormation stack
+# =========================================================================
+log_info "Packaging CloudFormation template (uploading Lambda code to S3)..."
+aws cloudformation package \
+    --template-file "${TEMPLATE_FILE}" \
+    --s3-bucket "${ARTIFACTS_BUCKET}" \
+    --s3-prefix "lambda" \
+    --output-template-file "${PACKAGED_TEMPLATE}" \
+    --region "${AWS_REGION}" \
+    --profile "${AWS_PROFILE}"
+
+log_info "Validating packaged CloudFormation template..."
 aws cloudformation validate-template \
-    --template-body "file://${TEMPLATE_FILE}" \
+    --template-body "file://${PACKAGED_TEMPLATE}" \
     --region "${AWS_REGION}" \
     --profile "${AWS_PROFILE}" > /dev/null
 
 log_info "Deploying stack: ${STACK_NAME}"
 
 aws cloudformation deploy \
-    --template-file "${TEMPLATE_FILE}" \
+    --template-file "${PACKAGED_TEMPLATE}" \
     --stack-name "${STACK_NAME}" \
     --region "${AWS_REGION}" \
     --profile "${AWS_PROFILE}" \

@@ -8,6 +8,29 @@ const STATUS_CONFIG = {
   denied: { label: 'Odbijeno', bg: 'bg-red-100', text: 'text-red-700' },
 }
 
+const FEEDBACK_STATUS_CONFIG = {
+  pending: { label: 'Na čekanju', bg: 'bg-yellow-100', text: 'text-yellow-700' },
+  approved: { label: 'Odobreno', bg: 'bg-green-100', text: 'text-green-700' },
+  rejected: { label: 'Odbijeno', bg: 'bg-red-100', text: 'text-red-700' },
+}
+
+function StarRating({ score, size = 'w-5 h-5' }) {
+  return (
+    <div className="flex gap-0.5">
+      {[1, 2, 3, 4, 5].map((star) => (
+        <svg
+          key={star}
+          className={`${size} ${star <= score ? 'text-yellow-400' : 'text-dark-200'}`}
+          fill="currentColor"
+          viewBox="0 0 20 20"
+        >
+          <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
+        </svg>
+      ))}
+    </div>
+  )
+}
+
 export default function AdminClassDetail() {
   const { id } = useParams()
   const navigate = useNavigate()
@@ -17,6 +40,7 @@ export default function AdminClassDetail() {
   const [error, setError] = useState('')
   const [deleting, setDeleting] = useState(false)
   const [actionId, setActionId] = useState(null)
+  const [feedbackActionId, setFeedbackActionId] = useState(null)
 
   useEffect(() => {
     loadClass()
@@ -78,6 +102,18 @@ export default function AdminClassDetail() {
     }
   }
 
+  const handleFeedbackStatusChange = async (bookingId, status) => {
+    try {
+      setFeedbackActionId(bookingId)
+      await adminApi.updateFeedbackStatus(bookingId, status)
+      await loadClass()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setFeedbackActionId(null)
+    }
+  }
+
   const formatDate = (dateString) => {
     if (!dateString) return '-'
     return new Date(dateString).toLocaleDateString('hr-HR', {
@@ -114,6 +150,12 @@ export default function AdminClassDetail() {
   const confirmedCount = bookings.filter(b => b.status === 'confirmed').length
   const deniedCount = bookings.filter(b => b.status === 'denied').length
   const isExpired = classData?.dateTime && new Date(classData.dateTime) < new Date()
+
+  const feedbackItems = classData?.feedback || []
+  const feedbackTotal = feedbackItems.length
+  const feedbackAverage = feedbackTotal > 0
+    ? (feedbackItems.reduce((sum, fb) => sum + (fb.score || 0), 0) / feedbackTotal).toFixed(1)
+    : 0
 
   return (
     <div className="min-h-screen bg-dark-50">
@@ -186,7 +228,14 @@ export default function AdminClassDetail() {
           </div>
 
           <div className="flex gap-3">
-            {!isExpired && (
+            {isExpired ? (
+              <>
+                <Link to={`/admin/class/${id}/edit`} className="btn-primary">Reaktiviraj tečaj</Link>
+                <button onClick={handleDelete} disabled={deleting} className="btn-danger">
+                  {deleting ? 'Brisanje...' : 'Obriši tečaj'}
+                </button>
+              </>
+            ) : (
               <>
                 <Link to={`/admin/class/${id}/edit`} className="btn-primary">Uredi tečaj</Link>
                 <button onClick={handleDelete} disabled={deleting} className="btn-danger">
@@ -301,6 +350,84 @@ export default function AdminClassDetail() {
             </div>
           )}
         </div>
+
+        {/* Feedback panel - always visible when there are reviews or class is finished */}
+        {(isExpired || feedbackTotal > 0) && (
+          <div className="card mt-6">
+            <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
+              <h3 className="text-lg font-bold text-dark-800">
+                Recenzije ({feedbackTotal})
+              </h3>
+              {feedbackTotal > 0 && (
+                <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-2">
+                    <StarRating score={Math.round(Number(feedbackAverage))} size="w-4 h-4" />
+                    <span className="text-sm font-semibold text-dark-700">{feedbackAverage}</span>
+                  </div>
+                  <span className="text-sm text-dark-400">
+                    ({feedbackTotal} {feedbackTotal === 1 ? 'recenzija' : feedbackTotal < 5 ? 'recenzije' : 'recenzija'})
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {feedbackItems.length === 0 ? (
+              <div className="text-center py-8 bg-dark-50 rounded-xl">
+                <svg className="w-12 h-12 mx-auto text-dark-300 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
+                </svg>
+                <p className="text-dark-400 text-sm">Još nema recenzija za ovaj tečaj</p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {feedbackItems
+                  .sort((a, b) => (b.submittedAt || '').localeCompare(a.submittedAt || ''))
+                  .map((fb) => {
+                    const fbStatus = fb.status || 'pending'
+                    const fbCfg = FEEDBACK_STATUS_CONFIG[fbStatus] || FEEDBACK_STATUS_CONFIG.pending
+                    const isProcessing = feedbackActionId === fb.bookingId
+                    return (
+                      <div key={fb.bookingId} className="bg-dark-50 rounded-xl p-4">
+                        <div className="flex flex-wrap items-start justify-between gap-3 mb-2">
+                          <div className="flex items-center gap-3">
+                            <span className="font-medium text-dark-800">{fb.attendeeName || 'Nepoznato'}</span>
+                            <span className={`inline-block px-2.5 py-0.5 rounded-full text-xs font-semibold ${fbCfg.bg} ${fbCfg.text}`}>
+                              {fbCfg.label}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <StarRating score={fb.score || 0} size="w-4 h-4" />
+                            {fbStatus === 'pending' && (
+                              <div className="flex gap-1">
+                                <button
+                                  onClick={() => handleFeedbackStatusChange(fb.bookingId, 'approved')}
+                                  disabled={isProcessing}
+                                  className="text-green-600 hover:text-green-800 text-xs font-semibold px-2 py-1 rounded hover:bg-green-50 transition-colors"
+                                >
+                                  {isProcessing ? '...' : 'Odobri'}
+                                </button>
+                                <button
+                                  onClick={() => handleFeedbackStatusChange(fb.bookingId, 'rejected')}
+                                  disabled={isProcessing}
+                                  className="text-red-500 hover:text-red-700 text-xs font-semibold px-2 py-1 rounded hover:bg-red-50 transition-colors"
+                                >
+                                  {isProcessing ? '...' : 'Odbij'}
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        <p className="text-dark-600 text-sm mb-2">{fb.comment}</p>
+                        <p className="text-dark-400 text-xs">
+                          {fb.submittedAt ? formatDate(fb.submittedAt) : '-'}
+                        </p>
+                      </div>
+                    )
+                  })}
+              </div>
+            )}
+          </div>
+        )}
       </main>
     </div>
   )

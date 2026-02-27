@@ -1,5 +1,6 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import { Link } from 'react-router-dom'
+import { publicApi } from '../services/api'
 
 const DAYS_HR = ['Pon', 'Uto', 'Sri', 'Čet', 'Pet', 'Sub', 'Ned']
 const MONTHS_HR = [
@@ -27,8 +28,10 @@ export default function ClassCalendar({ classes }) {
   const [currentMonth, setCurrentMonth] = useState(today.getMonth())
   const [currentYear, setCurrentYear] = useState(today.getFullYear())
   const [selectedDate, setSelectedDate] = useState(null)
+  const [reviewsData, setReviewsData] = useState({})
+  const [loadingReviews, setLoadingReviews] = useState({})
 
-  // Group classes by date string (YYYY-MM-DD)
+  // Group classes by date string (YYYY-MM-DD), including historical dates
   const classesByDate = useMemo(() => {
     const map = {}
     classes.forEach((cls) => {
@@ -37,6 +40,17 @@ export default function ClassCalendar({ classes }) {
       const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
       if (!map[key]) map[key] = []
       map[key].push(cls)
+
+      // Add history entries (past dates when this class was previously held)
+      if (cls.dateHistory && cls.dateHistory.length > 0) {
+        cls.dateHistory.forEach((histDt) => {
+          const hd = new Date(histDt)
+          const hKey = `${hd.getFullYear()}-${String(hd.getMonth() + 1).padStart(2, '0')}-${String(hd.getDate()).padStart(2, '0')}`
+          if (!map[hKey]) map[hKey] = []
+          // Create a history-only entry so we can distinguish it
+          map[hKey].push({ ...cls, dateTime: histDt, _isHistory: true })
+        })
+      }
     })
     return map
   }, [classes])
@@ -83,6 +97,42 @@ export default function ClassCalendar({ classes }) {
     `${currentYear}-${String(currentMonth + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`
 
   const selectedClasses = selectedDate ? classesByDate[selectedDate] || [] : []
+
+  // Fetch reviews for all classes when a date is selected
+  useEffect(() => {
+    if (!selectedDate) return
+    selectedClasses.forEach((cls) => {
+      if (reviewsData[cls.classId] || loadingReviews[cls.classId]) return
+      setLoadingReviews((prev) => ({ ...prev, [cls.classId]: true }))
+      publicApi
+        .getClassReviews(cls.classId)
+        .then((data) => {
+          setReviewsData((prev) => ({ ...prev, [cls.classId]: data }))
+        })
+        .catch(() => {
+          setReviewsData((prev) => ({
+            ...prev,
+            [cls.classId]: { reviews: [], averageScore: 0, totalReviews: 0 },
+          }))
+        })
+        .finally(() => {
+          setLoadingReviews((prev) => ({ ...prev, [cls.classId]: false }))
+        })
+    })
+  }, [selectedDate]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const renderStars = (score) => {
+    return Array.from({ length: 5 }, (_, i) => (
+      <svg
+        key={i}
+        className={`w-4 h-4 ${i < Math.round(score) ? 'text-yellow-400' : 'text-dark-200'}`}
+        fill="currentColor"
+        viewBox="0 0 20 20"
+      >
+        <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
+      </svg>
+    ))
+  }
 
   return (
     <div className="card">
@@ -193,31 +243,83 @@ export default function ClassCalendar({ classes }) {
           {selectedClasses.map((cls) => {
             const isFull = cls.availableSeats <= 0
             const past = isPastClass(cls)
+            const isHistory = cls._isHistory
+            const reviews = reviewsData[cls.classId]
+            const isLoadingReview = loadingReviews[cls.classId]
+            const hasReviews = reviews && reviews.totalReviews > 0
             return (
               <div
-                key={cls.classId}
-                className={`flex items-center justify-between p-3 rounded-lg border border-dark-100 ${past ? 'bg-dark-100 opacity-70' : 'bg-dark-50'}`}
+                key={`${cls.classId}-${cls.dateTime}`}
+                className={`rounded-lg border border-dark-100 ${past || isHistory ? 'bg-dark-100 opacity-70' : 'bg-dark-50'}`}
               >
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className={`font-semibold text-sm truncate ${past ? 'text-dark-400' : 'text-dark-800'}`}>{cls.title}</span>
-                    <span className={`text-xs px-2 py-0.5 rounded-full whitespace-nowrap ${past ? 'bg-dark-200 text-dark-400' : isFull ? 'bg-red-100 text-red-600' : 'bg-green-100 text-green-700'}`}>
-                      {past ? 'Završeno' : isFull ? 'Popunjeno' : `${cls.availableSeats}/${cls.totalSeats}`}
-                    </span>
+                <div className="flex items-center justify-between p-3">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className={`font-semibold text-sm truncate ${past || isHistory ? 'text-dark-400' : 'text-dark-800'}`}>{cls.title}</span>
+                      <span className={`text-xs px-2 py-0.5 rounded-full whitespace-nowrap ${past || isHistory ? 'bg-dark-200 text-dark-400' : isFull ? 'bg-red-100 text-red-600' : 'bg-green-100 text-green-700'}`}>
+                        {isHistory ? 'Održano' : past ? 'Završeno' : isFull ? 'Popunjeno' : `${cls.availableSeats}/${cls.totalSeats}`}
+                      </span>
+                    </div>
+                    <div className="text-xs text-dark-500 mt-1 flex items-center gap-3">
+                      {cls.dateTime && <span>{formatTime(cls.dateTime)}</span>}
+                      {cls.location && <span>📍 {cls.location}</span>}
+                      {cls.instructor && <span>👤 {cls.instructor}</span>}
+                    </div>
                   </div>
-                  <div className="text-xs text-dark-500 mt-1 flex items-center gap-3">
-                    {cls.dateTime && <span>{formatTime(cls.dateTime)}</span>}
-                    {cls.location && <span>📍 {cls.location}</span>}
-                    {cls.instructor && <span>👤 {cls.instructor}</span>}
-                  </div>
+                  {!past && !isHistory && !isFull && (
+                    <Link
+                      to={`/book/${cls.classId}`}
+                      className="ml-3 text-xs bg-primary-500 text-white px-3 py-1.5 rounded-full hover:bg-primary-600 transition-colors whitespace-nowrap"
+                    >
+                      Rezerviraj
+                    </Link>
+                  )}
                 </div>
-                {!past && !isFull && (
-                  <Link
-                    to={`/book/${cls.classId}`}
-                    className="ml-3 text-xs bg-primary-500 text-white px-3 py-1.5 rounded-full hover:bg-primary-600 transition-colors whitespace-nowrap"
-                  >
-                    Rezerviraj
-                  </Link>
+                {isLoadingReview && (
+                  <div className="px-3 pb-3 pt-1 border-t border-dark-200">
+                    <p className="text-xs text-dark-400">Učitavanje recenzija...</p>
+                  </div>
+                )}
+                {!isLoadingReview && hasReviews && (
+                  <div className="px-3 pb-3 pt-1 border-t border-dark-200">
+                    <h4 className="text-xs font-semibold text-dark-600 mb-2">Recenzije polaznika</h4>
+                    {reviews.totalReviews === 0 ? (
+                      <p className="text-xs text-dark-400">Još nema recenzija</p>
+                    ) : (
+                      <>
+                        <div className="flex items-center gap-2 mb-2">
+                          <div className="flex items-center gap-0.5">
+                            {renderStars(reviews.averageScore)}
+                          </div>
+                          <span className="text-xs font-semibold text-dark-700">
+                            {reviews.averageScore.toFixed(1)}
+                          </span>
+                          <span className="text-xs text-dark-400">
+                            ({reviews.totalReviews} {reviews.totalReviews === 1 ? 'recenzija' : 'recenzija'})
+                          </span>
+                        </div>
+                        <div className="space-y-2">
+                          {reviews.reviews.map((review, idx) => (
+                            <div key={idx} className="bg-white rounded p-2 border border-dark-100">
+                              <div className="flex items-center gap-1 mb-1">
+                                <div className="flex items-center gap-0.5">
+                                  {renderStars(review.score)}
+                                </div>
+                                <span className="text-[0.65rem] text-dark-400 ml-auto">
+                                  {new Date(review.submittedAt).toLocaleDateString('hr-HR', {
+                                    day: 'numeric',
+                                    month: 'long',
+                                    year: 'numeric',
+                                  })}
+                                </span>
+                              </div>
+                              <p className="text-xs text-dark-600">{review.comment}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </div>
                 )}
               </div>
             )

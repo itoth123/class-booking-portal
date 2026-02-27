@@ -7,6 +7,7 @@ import AdminLogin from './pages/AdminLogin'
 import AdminDashboard from './pages/AdminDashboard'
 import AdminClassForm from './pages/AdminClassForm'
 import AdminClassDetail from './pages/AdminClassDetail'
+import FeedbackForm from './pages/FeedbackForm'
 
 function AdminRoute({ children }) {
   const { isAuthenticated, loading } = useAuth()
@@ -29,6 +30,7 @@ function AppRoutes() {
       <Route path="/" element={<ClassList />} />
       <Route path="/book/:id" element={<BookingForm />} />
       <Route path="/booking-success" element={<BookingSuccess />} />
+      <Route path="/feedback/:token" element={<FeedbackForm />} />
 
       {/* Admin routes */}
       <Route path="/admin/login" element={<AdminLogin />} />

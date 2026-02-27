@@ -46,6 +46,29 @@ export const publicApi = {
     })
     return handleResponse(response)
   },
+
+  getFeedbackInfo: async (token) => {
+    const response = await fetch(`${API_BASE}/feedback/${token}`, {
+      headers: { 'Content-Type': 'application/json' },
+    })
+    return handleResponse(response)
+  },
+
+  submitFeedback: async (token, data) => {
+    const response = await fetch(`${API_BASE}/feedback/${token}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    })
+    return handleResponse(response)
+  },
+
+  getClassReviews: async (classId) => {
+    const response = await fetch(`${API_BASE}/classes/${classId}/reviews`, {
+      headers: { 'Content-Type': 'application/json' },
+    })
+    return handleResponse(response)
+  },
 }
 
 export const adminApi = {
@@ -105,6 +128,16 @@ export const adminApi = {
     const response = await fetch(`${API_BASE}/admin/bookings/${bookingId}`, {
       method: 'DELETE',
       headers,
+    })
+    return handleResponse(response)
+  },
+
+  updateFeedbackStatus: async (feedbackId, status) => {
+    const headers = await getAuthHeaders()
+    const response = await fetch(`${API_BASE}/admin/feedback/${feedbackId}`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify({ status }),
     })
     return handleResponse(response)
   },
