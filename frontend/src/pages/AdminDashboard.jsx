@@ -8,6 +8,7 @@ export default function AdminDashboard() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [deleteId, setDeleteId] = useState(null)
+  const [tab, setTab] = useState('active')
 
   const { user, logout } = useAuth()
   const navigate = useNavigate()
@@ -61,6 +62,11 @@ export default function AdminDashboard() {
   const totalSeats = classes.reduce((sum, c) => sum + (c.totalSeats || 0), 0)
   const availableSeats = classes.reduce((sum, c) => sum + (c.availableSeats || 0), 0)
   const takenSeats = totalSeats - availableSeats
+
+  const now = new Date()
+  const activeClasses = classes.filter(c => !c.dateTime || new Date(c.dateTime) >= now)
+  const expiredClasses = classes.filter(c => c.dateTime && new Date(c.dateTime) < now)
+  const displayedClasses = tab === 'active' ? activeClasses : expiredClasses
 
   return (
     <div className="min-h-screen bg-dark-50">
@@ -126,7 +132,7 @@ export default function AdminDashboard() {
 
         {/* Actions */}
         <div className="card mb-6">
-          <div className="flex justify-between items-center">
+          <div className="flex justify-between items-center mb-4">
             <h2 className="text-lg font-bold text-dark-800">Tečajevi</h2>
             <Link to="/admin/class/new" className="btn-primary">
               <span className="flex items-center gap-2">
@@ -136,6 +142,20 @@ export default function AdminDashboard() {
                 Dodaj tečaj
               </span>
             </Link>
+          </div>
+          <div className="flex gap-1 border-b border-dark-100">
+            <button
+              onClick={() => setTab('active')}
+              className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${tab === 'active' ? 'border-primary-500 text-primary-600' : 'border-transparent text-dark-400 hover:text-dark-600'}`}
+            >
+              Aktivni ({activeClasses.length})
+            </button>
+            <button
+              onClick={() => setTab('expired')}
+              className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${tab === 'expired' ? 'border-primary-500 text-primary-600' : 'border-transparent text-dark-400 hover:text-dark-600'}`}
+            >
+              Završeni ({expiredClasses.length})
+            </button>
           </div>
         </div>
 
@@ -161,31 +181,37 @@ export default function AdminDashboard() {
             <p className="text-dark-500 mb-6">Započnite dodavanjem prvog tečaja</p>
             <Link to="/admin/class/new" className="btn-primary">Dodaj prvi tečaj</Link>
           </div>
+        ) : displayedClasses.length === 0 ? (
+          <div className="card text-center py-12">
+            <p className="text-dark-400">{tab === 'active' ? 'Nema aktivnih tečajeva' : 'Nema završenih tečajeva'}</p>
+          </div>
         ) : (
           <div className="grid gap-4">
-            {classes.map((cls) => {
+            {displayedClasses.map((cls) => {
               const isFull = cls.availableSeats <= 0
+              const isExpired = cls.dateTime && new Date(cls.dateTime) < now
               return (
                 <div
                   key={cls.classId}
-                  className="card flex flex-col sm:flex-row sm:items-center justify-between gap-4 hover:shadow-xl hover:border-primary-200 transition-all duration-300 cursor-pointer group"
+                  className={`card flex flex-col sm:flex-row sm:items-center justify-between gap-4 transition-all duration-300 cursor-pointer group ${isExpired ? 'opacity-60 bg-dark-50' : 'hover:shadow-xl hover:border-primary-200'}`}
                   onClick={() => navigate(`/admin/class/${cls.classId}`)}
                 >
                   <div className="flex items-center gap-4">
-                    <div className={`w-14 h-14 rounded-xl flex items-center justify-center text-white text-lg font-bold shadow-lg group-hover:scale-110 transition-transform ${isFull ? 'bg-dark-300 shadow-dark-300/30' : 'bg-gradient-to-br from-primary-400 to-primary-600 shadow-primary-500/30'}`}>
+                    <div className={`w-14 h-14 rounded-xl flex items-center justify-center text-white text-lg font-bold shadow-lg group-hover:scale-110 transition-transform ${isExpired ? 'bg-dark-300 shadow-dark-300/30' : isFull ? 'bg-dark-300 shadow-dark-300/30' : 'bg-gradient-to-br from-primary-400 to-primary-600 shadow-primary-500/30'}`}>
                       <svg className="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
                       </svg>
                     </div>
                     <div>
-                      <h3 className="font-semibold text-dark-800 group-hover:text-primary-600 transition-colors">
+                      <h3 className={`font-semibold transition-colors ${isExpired ? 'text-dark-400' : 'text-dark-800 group-hover:text-primary-600'}`}>
                         {cls.title}
+                        {isExpired && <span className="ml-2 text-xs font-normal text-dark-400 bg-dark-200 px-2 py-0.5 rounded-full">Završeno</span>}
                       </h3>
                       <p className="text-dark-500 text-sm">
                         {cls.dateTime ? formatDate(cls.dateTime) : 'Datum nije postavljen'}
                       </p>
                       <div className="flex items-center gap-3 mt-1">
-                        <span className={`text-sm font-medium ${isFull ? 'text-red-500' : 'text-green-600'}`}>
+                        <span className={`text-sm font-medium ${isExpired ? 'text-dark-400' : isFull ? 'text-red-500' : 'text-green-600'}`}>
                           {cls.availableSeats}/{cls.totalSeats} slobodnih
                         </span>
                         {cls.instructor && (
@@ -195,21 +221,23 @@ export default function AdminDashboard() {
                     </div>
                   </div>
 
-                  <div className="flex gap-2 sm:ml-auto" onClick={(e) => e.stopPropagation()}>
-                    <Link
-                      to={`/admin/class/${cls.classId}/edit`}
-                      className="btn-secondary text-sm py-2"
-                    >
-                      Uredi
-                    </Link>
-                    <button
-                      onClick={() => handleDelete(cls.classId)}
-                      disabled={deleteId === cls.classId}
-                      className="btn-danger text-sm py-2"
-                    >
-                      {deleteId === cls.classId ? 'Brisanje...' : 'Obriši'}
-                    </button>
-                  </div>
+                  {!isExpired && (
+                    <div className="flex gap-2 sm:ml-auto" onClick={(e) => e.stopPropagation()}>
+                      <Link
+                        to={`/admin/class/${cls.classId}/edit`}
+                        className="btn-secondary text-sm py-2"
+                      >
+                        Uredi
+                      </Link>
+                      <button
+                        onClick={() => handleDelete(cls.classId)}
+                        disabled={deleteId === cls.classId}
+                        className="btn-danger text-sm py-2"
+                      >
+                        {deleteId === cls.classId ? 'Brisanje...' : 'Obriši'}
+                      </button>
+                    </div>
+                  )}
                 </div>
               )
             })}

@@ -31,6 +31,13 @@ export default function AdminClassForm() {
     try {
       setLoading(true)
       const cls = await adminApi.getClass(id)
+
+      // Prevent editing expired classes
+      if (cls.dateTime && new Date(cls.dateTime) < new Date()) {
+        navigate(`/admin/class/${id}`)
+        return
+      }
+
       setFormData({
         title: cls.title || '',
         description: cls.description || '',

@@ -113,6 +113,7 @@ export default function AdminClassDetail() {
   const pendingCount = bookings.filter(b => (b.status || 'pending') === 'pending').length
   const confirmedCount = bookings.filter(b => b.status === 'confirmed').length
   const deniedCount = bookings.filter(b => b.status === 'denied').length
+  const isExpired = classData?.dateTime && new Date(classData.dateTime) < new Date()
 
   return (
     <div className="min-h-screen bg-dark-50">
@@ -140,13 +141,16 @@ export default function AdminClassDetail() {
         <div className="card mb-6">
           <div className="flex items-start justify-between mb-6 pb-6 border-b border-dark-100">
             <div className="flex items-center gap-5">
-              <div className="w-16 h-16 rounded-xl bg-gradient-to-br from-primary-400 to-primary-600 flex items-center justify-center text-white shadow-lg shadow-primary-500/30">
+              <div className={`w-16 h-16 rounded-xl flex items-center justify-center text-white shadow-lg ${isExpired ? 'bg-dark-300 shadow-dark-300/30' : 'bg-gradient-to-br from-primary-400 to-primary-600 shadow-primary-500/30'}`}>
                 <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
                 </svg>
               </div>
               <div>
-                <h2 className="text-2xl font-bold text-dark-800">{classData?.title}</h2>
+                <h2 className="text-2xl font-bold text-dark-800">
+                  {classData?.title}
+                  {isExpired && <span className="ml-3 text-sm font-normal text-dark-400 bg-dark-200 px-3 py-1 rounded-full align-middle">Završeno</span>}
+                </h2>
                 {classData?.instructor && (
                   <p className="text-dark-500">Predavač: {classData.instructor}</p>
                 )}
@@ -182,10 +186,14 @@ export default function AdminClassDetail() {
           </div>
 
           <div className="flex gap-3">
-            <Link to={`/admin/class/${id}/edit`} className="btn-primary">Uredi tečaj</Link>
-            <button onClick={handleDelete} disabled={deleting} className="btn-danger">
-              {deleting ? 'Brisanje...' : 'Obriši tečaj'}
-            </button>
+            {!isExpired && (
+              <>
+                <Link to={`/admin/class/${id}/edit`} className="btn-primary">Uredi tečaj</Link>
+                <button onClick={handleDelete} disabled={deleting} className="btn-danger">
+                  {deleting ? 'Brisanje...' : 'Obriši tečaj'}
+                </button>
+              </>
+            )}
             <Link to="/admin" className="btn-secondary">Povratak</Link>
           </div>
         </div>
